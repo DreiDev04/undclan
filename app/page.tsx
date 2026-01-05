@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import {
   Box,
   Users,
@@ -15,6 +15,9 @@ import {
   FileText,
   Save,
   Gift,
+  ChevronDown,
+  X,
+  Check
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -67,10 +70,16 @@ interface HistoryItem {
   displayDate: string;
 }
 
+// Updated to support multiple items
+interface WonItemDetail {
+    name: string;
+    rarity: Rarity;
+    quantityWon: number;
+}
+
 interface RaffleResult {
   winner: Participant;
-  item: LootItem;
-  quantityWon: number;
+  wonItems: WonItemDetail[];
 }
 
 // --- Helper Hook: Local Storage ---
@@ -119,6 +128,9 @@ const WHEEL_COLORS = [
   "#d946ef", // Fuchsia
 ];
 
+// --- Rarity Helper ---
+const RARITY_ORDER = { legendary: 5, epic: 4, rare: 3, uncommon: 2, common: 1 };
+
 // --- Main Component ---
 export default function ClanLootSystem() {
   // --- State ---
@@ -143,7 +155,10 @@ export default function ClanLootSystem() {
   const [bulkNames, setBulkNames] = useState("");
 
   // Raffle States
-  const [selectedRaffleItem, setSelectedRaffleItem] = useState<string>("");
+  // CHANGED: Use array for multi-select
+  const [selectedItemIds, setSelectedItemIds] = useState<string[]>([]);
+  const [isItemDropdownOpen, setIsItemDropdownOpen] = useState(false);
+  
   const [raffleQtyToGive, setRaffleQtyToGive] = useState<number>(1);
   const [isRaffling, setIsRaffling] = useState(false);
   const [raffleResult, setRaffleResult] = useState<RaffleResult | null>(null);
@@ -167,6 +182,8 @@ export default function ClanLootSystem() {
 
   const deleteItem = (id: string) => {
     setLootItems(lootItems.filter((i) => i.id !== id));
+    // Remove from selection if deleted
+    setSelectedItemIds(prev => prev.filter(itemId => itemId !== id));
   };
 
   const addParticipant = () => {
@@ -198,8 +215,34 @@ export default function ClanLootSystem() {
     setParticipants(participants.filter((p) => p.id !== id));
   };
 
+  // --- Multi Select Logic ---
+  const toggleItemSelection = (id: string) => {
+    setSelectedItemIds(prev => 
+        prev.includes(id) ? prev.filter(i => i !== id) : [...prev, id]
+    );
+    // Reset quantity to 1 when selection changes to be safe
+    setRaffleQtyToGive(1);
+  };
+
+  const getMaxQty = () => {
+    if (selectedItemIds.length === 0) return 1;
+    // Get all selected item objects
+    const selectedItems = lootItems.filter(i => selectedItemIds.includes(i.id));
+    if (selectedItems.length === 0) return 1;
+    // The max raffle quantity is limited by the item with the LOWEST stock
+    return Math.min(...selectedItems.map(i => i.quantity));
+  };
+
+  // Helper to determine the "highest" rarity in a bundle
+  const getHighestRarity = (items: LootItem[]): Rarity => {
+     if(items.length === 0) return "common";
+     return items.reduce((prev, current) => {
+        return RARITY_ORDER[current.rarity] > RARITY_ORDER[prev.rarity] ? current : prev;
+     }).rarity;
+  };
+
   const runRaffle = () => {
-    if (!selectedRaffleItem || participants.length === 0) return;
+    if (selectedItemIds.length === 0 || participants.length === 0) return;
     if (isRaffling) return;
 
     setIsRaffling(true);
@@ -225,25 +268,36 @@ export default function ClanLootSystem() {
 
     // 3. Wait for animation to finish (5 seconds)
     setTimeout(() => {
-      const item = lootItems.find((i) => i.id === selectedRaffleItem);
+      const selectedItems = lootItems.filter((i) => selectedItemIds.includes(i.id));
 
-      if (item) {
+      if (selectedItems.length > 0) {
+        
+        // Prepare result object
+        const wonItems: WonItemDetail[] = selectedItems.map(item => ({
+            name: item.name,
+            rarity: item.rarity,
+            quantityWon: raffleQtyToGive
+        }));
+
         setRaffleResult({
           winner: winner,
-          item: item,
-          quantityWon: raffleQtyToGive,
+          wonItems: wonItems
         });
 
         setIsRaffling(false);
 
         // Record History
         const now = new Date();
+        // Construct a display name for the history (e.g., "Sword + Shield + Potion")
+        const bundleName = selectedItems.map(i => i.name).join(" + ");
+        const bundleRarity = getHighestRarity(selectedItems);
+
         const historyRecord: HistoryItem = {
           id: crypto.randomUUID(),
-          itemName: item.name,
-          rarity: item.rarity,
+          itemName: selectedItems.length > 1 ? `Bundle: ${bundleName}` : bundleName,
+          rarity: bundleRarity,
           winnerName: winner.name,
-          quantityWon: raffleQtyToGive,
+          quantityWon: raffleQtyToGive, // Applies to each item in the bundle
           timestamp: now.toISOString(),
           displayTime: now.toLocaleTimeString([], {
             hour: "2-digit",
@@ -256,17 +310,26 @@ export default function ClanLootSystem() {
         };
         setHistory([historyRecord, ...history]);
 
-        // Decrease item quantity
-        const newQty = Math.max(0, item.quantity - raffleQtyToGive);
-        setLootItems((items) =>
-          items.map((i) => (i.id === item.id ? { ...i, quantity: newQty } : i))
-        );
+        // Decrease item quantities
+        const newLootItems = lootItems.map(item => {
+            if (selectedItemIds.includes(item.id)) {
+                return { ...item, quantity: Math.max(0, item.quantity - raffleQtyToGive) };
+            }
+            return item;
+        });
+        setLootItems(newLootItems);
 
-        if (newQty === 0) {
-          setSelectedRaffleItem("");
-          setRaffleQtyToGive(1);
-        } else if (raffleQtyToGive > newQty) {
-          setRaffleQtyToGive(newQty);
+        // Check if any selected item ran out of stock
+        const ranOut = newLootItems.filter(i => selectedItemIds.includes(i.id) && i.quantity === 0);
+        if (ranOut.length > 0) {
+            // Remove items with 0 qty from selection
+            const ranOutIds = ranOut.map(i => i.id);
+            setSelectedItemIds(prev => prev.filter(id => !ranOutIds.includes(id)));
+            setRaffleQtyToGive(1);
+        } else {
+             // Re-validate qty against new max
+             const newMax = Math.min(...newLootItems.filter(i => selectedItemIds.includes(i.id)).map(i => i.quantity));
+             if(raffleQtyToGive > newMax) setRaffleQtyToGive(newMax);
         }
 
         if (removeWinner) {
@@ -403,11 +466,6 @@ export default function ClanLootSystem() {
         </g>
       );
     });
-  };
-
-  const getMaxQty = () => {
-    const item = lootItems.find((i) => i.id === selectedRaffleItem);
-    return item ? item.quantity : 1;
   };
 
   return (
@@ -687,7 +745,7 @@ export default function ClanLootSystem() {
               {/* Winner Popup */}
               {raffleResult && (
                 <div className="absolute inset-0 z-30 bg-black/60 backdrop-blur-sm flex flex-col items-center justify-center animate-in fade-in duration-300">
-                  <div className="text-center animate-in zoom-in duration-500 p-8 bg-zinc-900 rounded-xl border border-zinc-800 shadow-2xl flex flex-col items-center gap-4">
+                  <div className="text-center animate-in zoom-in duration-500 p-8 bg-zinc-900 rounded-xl border border-zinc-800 shadow-2xl flex flex-col items-center gap-4 max-w-md w-full">
                     <Sparkles className="w-12 h-12 text-yellow-400 mx-auto" />
 
                     <div>
@@ -699,33 +757,29 @@ export default function ClanLootSystem() {
                       </h2>
                     </div>
 
-                    {/* Display Won Item */}
-                    <div className="bg-zinc-950/50 p-4 rounded-lg border border-zinc-800 w-full flex flex-col items-center gap-2">
-                      <p className="text-zinc-500 text-xs">Won Loot</p>
-                      <div className="flex items-center gap-2">
-                        <Badge
-                          variant="outline"
-                          className={`${getRarityColor(
-                            raffleResult.item.rarity
-                          )} uppercase text-[10px]`}
-                        >
-                          {raffleResult.item.rarity}
-                        </Badge>
-                        <span className="text-xl font-bold">
-                          {raffleResult.item.name}
-                        </span>
-                        <Badge
-                          variant="secondary"
-                          className="bg-zinc-800 text-zinc-300"
-                        >
-                          x{raffleResult.quantityWon}
-                        </Badge>
-                      </div>
+                    {/* Display Won Items List */}
+                    <div className="bg-zinc-950/50 p-4 rounded-lg border border-zinc-800 w-full flex flex-col gap-2 max-h-[200px] overflow-y-auto">
+                      <p className="text-zinc-500 text-xs mb-1">Won Loot Bundle</p>
+                      {raffleResult.wonItems.map((item, idx) => (
+                          <div key={idx} className="flex items-center justify-between p-2 rounded bg-zinc-900/50 border border-zinc-800/50">
+                             <div className="flex items-center gap-2">
+                                <Badge
+                                    variant="outline"
+                                    className={`${getRarityColor(item.rarity)} uppercase text-[10px]`}
+                                >
+                                    {item.rarity}
+                                </Badge>
+                                <span className="font-medium text-sm text-left">{item.name}</span>
+                             </div>
+                             <Badge variant="secondary" className="bg-zinc-800 text-zinc-300 ml-2">x{item.quantityWon}</Badge>
+                          </div>
+                      ))}
                     </div>
 
                     <Button
                       onClick={() => setRaffleResult(null)}
                       variant={"secondary"}
+                      className="w-full mt-2"
                     >
                       <RefreshCcw className="w-4 h-4 mr-2" /> New Raffle
                     </Button>
@@ -825,43 +879,63 @@ export default function ClanLootSystem() {
               </CardContent>
 
               <div className="p-4 border-t border-zinc-800 bg-zinc-900/50 space-y-4">
-                <div className="space-y-2">
-                  <Label className="text-zinc-500 text-[10px] uppercase font-bold tracking-wider">
-                    Select Loot Item
+                
+                {/* --- CUSTOM MULTI-SELECT DROPDOWN --- */}
+                <div className="space-y-2 relative ">
+                  <Label className="text-zinc-500 text-[10px] uppercase font-bold tracking-wider ">
+                    Select Loot Items (Bundle)
                   </Label>
-                  <Select
-                    value={selectedRaffleItem}
-                    onValueChange={(val) => {
-                      setSelectedRaffleItem(val);
-                      setRaffleQtyToGive(1);
-                    }}
+                  <Button
+                    variant="outline"
+                    role="combobox"
+                    onClick={() => setIsItemDropdownOpen(!isItemDropdownOpen)}
+                    className="w-full justify-between bg-zinc-900 border-zinc-800 hover:bg-zinc-800 hover:text-white"
                   >
-                    <SelectTrigger className="bg-zinc-900 border-zinc-800">
-                      <SelectValue placeholder="Choose item..." />
-                    </SelectTrigger>
-                    <SelectContent className="bg-zinc-900 border-zinc-800 text-white">
-                      {lootItems.length === 0 ? (
-                        <SelectItem value="none" disabled>
-                          No items available
-                        </SelectItem>
-                      ) : (
-                        lootItems.map((item) => (
-                          <SelectItem
-                            key={item.id}
-                            value={item.id}
-                            disabled={item.quantity === 0}
-                          >
-                            {item.name} (Available: {item.quantity})
-                          </SelectItem>
-                        ))
-                      )}
-                    </SelectContent>
-                  </Select>
+                    {selectedItemIds.length > 0
+                        ? `${selectedItemIds.length} items selected`
+                        : "Choose items to raffle..."}
+                    <ChevronDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                  </Button>
+
+                  {/* Dropdown Content */}
+                  {isItemDropdownOpen && (
+                      <Card className="absolute z-50 w-full bottom-full mb-2 bg-zinc-950 border-zinc-800 shadow-xl text-white">
+                        <CardHeader className="p-3 border-b border-zinc-800 flex flex-row items-center justify-between">
+                            <span className="text-xs font-semibold">Available Loot</span>
+                            <X className="w-4 h-4 cursor-pointer text-zinc-400 hover:text-white" onClick={() => setIsItemDropdownOpen(false)}/>
+                        </CardHeader>
+                        <CardContent className="p-0 max-h-[200px] overflow-hidden">
+                             <ScrollArea className="h-[200px]">
+                                {lootItems.length === 0 ? (
+                                    <div className="p-4 text-center text-xs text-zinc-500">No items created</div>
+                                ) : (
+                                    <div className="p-1">
+                                        {lootItems.map(item => (
+                                            <div 
+                                                key={item.id} 
+                                                onClick={() => item.quantity > 0 && toggleItemSelection(item.id)}
+                                                className={`flex items-center gap-2 p-2 rounded cursor-pointer transition-colors ${item.quantity === 0 ? 'opacity-50 cursor-not-allowed' : 'hover:bg-zinc-800'}`}
+                                            >
+                                                <div className={`w-4 h-4 rounded border flex items-center justify-center ${selectedItemIds.includes(item.id) ? 'bg-violet-600 border-violet-600' : 'border-zinc-600'}`}>
+                                                    {selectedItemIds.includes(item.id) && <Check className="w-3 h-3 text-white" />}
+                                                </div>
+                                                <div className="flex-1 flex justify-between items-center">
+                                                    <span className="text-sm truncate">{item.name}</span>
+                                                    <Badge variant="secondary" className="text-[10px] h-5">x{item.quantity}</Badge>
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                             </ScrollArea>
+                        </CardContent>
+                      </Card>
+                  )}
                 </div>
 
                 <div className="space-y-2">
                   <Label className="text-zinc-500 text-[10px] uppercase font-bold tracking-wider">
-                    Quantity to Raffle
+                    Quantity per Item
                   </Label>
                   <div className="flex items-center gap-2">
                     <Input
@@ -875,10 +949,10 @@ export default function ClanLootSystem() {
                           setRaffleQtyToGive(val);
                       }}
                       className="bg-zinc-900 border-zinc-800"
-                      disabled={!selectedRaffleItem}
+                      disabled={selectedItemIds.length === 0}
                     />
                     <div className="text-xs text-zinc-500 whitespace-nowrap">
-                      / {getMaxQty()} avail
+                      / {getMaxQty()} avail (max)
                     </div>
                   </div>
                 </div>
@@ -904,7 +978,7 @@ export default function ClanLootSystem() {
                   onClick={runRaffle}
                   disabled={
                     isRaffling ||
-                    !selectedRaffleItem ||
+                    selectedItemIds.length === 0 ||
                     participants.length === 0
                   }
                   className="w-full bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 text-white border-0 h-12 text-lg font-semibold shadow-lg shadow-purple-500/20 transition-all active:scale-95"
