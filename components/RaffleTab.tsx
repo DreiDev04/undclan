@@ -324,7 +324,7 @@ export function RaffleTab({
                                 <Check className="w-3 h-3" />
                               )}
                             </div>
-                            <div className="flex-1 flex justify-between items-center">
+                            <div className="flex justify-between items-center gap-2 ">
                               <span className="text-sm truncate">{item.name}</span>
                               <Badge variant="outline" className="text-[10px] h-5">
                                 x{item.quantity}
